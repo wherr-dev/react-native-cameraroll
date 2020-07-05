@@ -31,6 +31,13 @@ const ASSET_TYPE_OPTIONS = {
 
 export type GroupTypes = $Keys<typeof GROUP_TYPES_OPTIONS>;
 
+export type Include =
+  | 'filename'
+  | 'fileSize'
+  | 'location'
+  | 'imageSize'
+  | 'playableDuration';
+
 /**
  * Shape of the param arg for the `getPhotos` function.
  */
@@ -64,9 +71,25 @@ export type GetPhotosParams = {
   assetType?: $Keys<typeof ASSET_TYPE_OPTIONS>,
 
   /**
+   * Earliest time to get photos from. A timestamp in milliseconds. Exclusive.
+   */
+  fromTime?: number,
+
+  /**
+   * Latest time to get photos from. A timestamp in milliseconds. Inclusive.
+   */
+  toTime?: Number,
+
+  /**
    * Filter by mimetype (e.g. image/jpeg).
    */
   mimeTypes?: Array<string>,
+
+  /**
+   * Specific fields in the output that we want to include, even though they
+   * might have some performance impact.
+   */
+  include?: Include[],
 };
 
 /**
@@ -95,21 +118,21 @@ export type PhotoIdentifier = {
     type: string,
     group_name: string,
     image: {
-      filename: string,
+      filename: string | null,
       uri: string,
       height: number,
       width: number,
-      isStored?: boolean,
+      fileSize: number | null,
       playableDuration: number,
     },
     timestamp: number,
-    location?: {
+    location: {
       latitude?: number,
       longitude?: number,
       altitude?: number,
       heading?: number,
       speed?: number,
-    },
+    } | null,
   },
 };
 
@@ -140,6 +163,7 @@ export type Album = {
   title: string,
   count: number,
 };
+
 /**
  * `CameraRoll` provides access to the local camera roll or photo library.
  *
@@ -202,6 +226,9 @@ class CameraRoll {
     tag: string,
     type?: 'photo' | 'video' | 'auto',
   ): Promise<string> {
+    console.warn(
+      'CameraRoll.saveToCameraRoll(tag, type) is deprecated.  Use the save function instead',
+    );
     return CameraRoll.save(tag, {type});
   }
   static getAlbums(
@@ -209,6 +236,18 @@ class CameraRoll {
   ): Promise<Album[]> {
     return RNCCameraRoll.getAlbums(params);
   }
+
+  static getParamsWithDefaults(params: GetPhotosParams): GetPhotosParams {
+    const newParams = {...params};
+    if (!newParams.assetType) {
+      newParams.assetType = ASSET_TYPE_OPTIONS.All;
+    }
+    if (!newParams.groupTypes && Platform.OS !== 'android') {
+      newParams.groupTypes = GROUP_TYPES_OPTIONS.All;
+    }
+    return newParams;
+  }
+
   /**
    * Returns a Promise with photo identifier objects from the local camera
    * roll of the device matching shape defined by `getPhotosReturnChecker`.
@@ -216,21 +255,19 @@ class CameraRoll {
    * See https://facebook.github.io/react-native/docs/cameraroll.html#getphotos
    */
   static getPhotos(params: GetPhotosParams): Promise<PhotoIdentifiersPage> {
-    if (!params.assetType) {
-      params.assetType = ASSET_TYPE_OPTIONS.All;
-    }
-    if (!params.groupTypes && Platform.OS !== 'android') {
-      params.groupTypes = GROUP_TYPES_OPTIONS.All;
-    }
+    params = CameraRoll.getParamsWithDefaults(params);
+    const promise = RNCCameraRoll.getPhotos(params);
+
     if (arguments.length > 1) {
       console.warn(
         'CameraRoll.getPhotos(tag, success, error) is deprecated.  Use the returned Promise instead',
       );
       let successCallback = arguments[1];
       const errorCallback = arguments[2] || (() => {});
-      RNCCameraRoll.getPhotos(params).then(successCallback, errorCallback);
+      promise.then(successCallback, errorCallback);
     }
-    return RNCCameraRoll.getPhotos(params);
+
+    return promise;
   }
 
   /**
