@@ -21,6 +21,7 @@
 #import <React/RCTUtils.h>
 
 #import "RNCAssetsLibraryRequestHandler.h"
+#import "PHAsset+Meta.h"
 
 @implementation RCTConvert (PHAssetCollectionSubtype)
 
@@ -97,20 +98,27 @@ static NSString *const kErrorAuthRestricted = @"E_PHOTO_LIBRARY_AUTH_RESTRICTED"
 static NSString *const kErrorAuthDenied = @"E_PHOTO_LIBRARY_AUTH_DENIED";
 
 typedef void (^PhotosAuthorizedBlock)(void);
+typedef void (^PhotosUnauthorizedBlock)(NSString*, NSString*);
 
-static void requestPhotoLibraryAccess(RCTPromiseRejectBlock reject, PhotosAuthorizedBlock authorizedBlock) {
+static void requestPhotoLibraryAccess(PhotosUnauthorizedBlock unauthorizedBlock, PhotosAuthorizedBlock authorizedBlock) {
   PHAuthorizationStatus authStatus = [PHPhotoLibrary authorizationStatus];
   if (authStatus == PHAuthorizationStatusRestricted) {
-    reject(kErrorAuthRestricted, @"Access to photo library is restricted", nil);
+    unauthorizedBlock(kErrorAuthRestricted, @"Access to photo library is restricted");
   } else if (authStatus == PHAuthorizationStatusAuthorized) {
     authorizedBlock();
   } else if (authStatus == PHAuthorizationStatusNotDetermined) {
     [PHPhotoLibrary requestAuthorization:^(PHAuthorizationStatus status) {
-      requestPhotoLibraryAccess(reject, authorizedBlock);
+      requestPhotoLibraryAccess(unauthorizedBlock, authorizedBlock);
     }];
   } else {
-    reject(kErrorAuthDenied, @"Access to photo library was denied", nil);
+    unauthorizedBlock(kErrorAuthDenied, @"Access to photo library was denied");
   }
+}
+
+static void requestPhotoLibraryAccessAndReject(RCTPromiseRejectBlock reject, PhotosAuthorizedBlock authorizedBlock) {
+  requestPhotoLibraryAccess(^(NSString *errorCode, NSString *errorMessage) {
+    reject(errorCode, errorMessage, nil);
+  }, authorizedBlock);
 }
 
 RCT_EXPORT_METHOD(saveToCameraRoll:(NSURLRequest *)request
@@ -191,7 +199,7 @@ RCT_EXPORT_METHOD(saveToCameraRoll:(NSURLRequest *)request
     saveWithOptions();
   };
 
-  requestPhotoLibraryAccess(reject, loadBlock);
+  requestPhotoLibraryAccessAndReject(reject, loadBlock);
 }
 
 RCT_EXPORT_METHOD(getAlbums:(NSDictionary *)params
@@ -281,7 +289,7 @@ RCT_EXPORT_METHOD(getPhotos:(NSDictionary *)params
   BOOL __block stopCollections_;
   NSString __block *currentCollectionName;
 
-  requestPhotoLibraryAccess(reject, ^{
+  requestPhotoLibraryAccessAndReject(reject, ^{
     void (^collectAsset)(PHAsset*, NSUInteger, BOOL*) = ^(PHAsset * _Nonnull asset, NSUInteger assetIdx, BOOL * _Nonnull stopAssets) {
       NSString *const uri = [NSString stringWithFormat:@"ph://%@", [asset localIdentifier]];
       if (afterCursor && !foundAfter) {
@@ -388,6 +396,163 @@ RCT_EXPORT_METHOD(getPhotos:(NSDictionary *)params
       RCTResolvePromise(resolve, assets, hasNextPage);
       resolvedPromise = YES;
     }
+  });
+}
+
+RCT_EXPORT_METHOD(getPhotoFile:(NSDictionary *)params
+                  callback:(RCTResponseSenderBlock)callback)
+{
+  checkPhotoLibraryConfig();
+
+  NSString *const uri = [RCTConvert NSString:params[@"uri"]];
+  NSString *const localIdentifier = [uri stringByReplacingOccurrencesOfString:@"ph://" withString:@""];
+
+  requestPhotoLibraryAccess(^(NSString *errorCode, NSString *errorMessage) {
+    callback(@[
+      @{
+        @"errorCode": errorCode,
+        @"message": errorMessage
+      },
+      [NSNull null]
+    ]);
+  }, ^{
+    PHFetchResult <PHAsset *> *const assetFetchResult = [PHAsset fetchAssetsWithLocalIdentifiers:@[localIdentifier] options:nil];
+      PHAsset *asset = [assetFetchResult firstObject];
+    if (!asset) {
+      callback(@[
+        @{
+          @"errorCode": @"no_asset",
+          @"message": @"Asset not found"
+        },
+        [NSNull null]
+      ]);
+    }
+      
+    PHAssetResource *assetResource = [[PHAssetResource assetResourcesForAsset:asset] firstObject];
+    NSString *pathToWrite = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
+    NSURL *pathUrl = [NSURL fileURLWithPath:pathToWrite];
+    NSString *fileURI = pathUrl.absoluteString;
+
+    PHAssetResourceRequestOptions *options = [PHAssetResourceRequestOptions new];
+    options.networkAccessAllowed = YES;
+
+    [[PHAssetResourceManager defaultManager] writeDataForAssetResource:assetResource toFile:pathUrl options:options completionHandler:^(NSError * _Nullable e) {
+        if (e == nil) {
+          callback(@[[NSNull null], fileURI]);
+        } else {
+          callback(@[e, [NSNull null]]);
+        }
+    }];
+  });
+}
+
+RCT_EXPORT_METHOD(releasePhotoFile:(NSDictionary *)params
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+{
+  NSString *const fileUri = [RCTConvert NSString:params[@"fileUri"]];
+
+  NSFileManager *fileManager = [NSFileManager defaultManager];
+
+  NSError *error;
+  BOOL success = [fileManager removeItemAtPath:fileUri error:&error];
+  if (success) {
+    resolve([NSNull null]);
+  } else {
+    reject(@"release_failed", @"Couldn't release temporary file.", error);
+  }
+}
+
+RCT_EXPORT_METHOD(getPhotoData:(NSDictionary *)params
+                  callback:(RCTResponseSenderBlock)callback)
+{
+  checkPhotoLibraryConfig();
+
+  NSString *const uri = [RCTConvert NSString:params[@"uri"]];
+  CGFloat const targetWidth = [RCTConvert CGFloat:params[@"targetWidth"]];
+  CGFloat const targetHeight = [RCTConvert CGFloat:params[@"targetHeight"]];
+  NSString *const contentModeString = [RCTConvert NSString:params[@"contentMode"]];
+  NSString *const deliveryModeString = [RCTConvert NSString:params[@"deliveryMode"]];
+  NSString *const format = [RCTConvert NSString:params[@"format"]];
+
+  NSString *const localIdentifier = [uri stringByReplacingOccurrencesOfString:@"ph://" withString:@""];
+  
+  PHImageContentMode contentMode = PHImageContentModeDefault;
+  if ([contentModeString isEqualToString:@"aspectFit"]) {
+    contentMode = PHImageContentModeAspectFit;
+  } else if ([contentModeString isEqualToString:@"aspectFill"]) {
+    contentMode = PHImageContentModeAspectFill;
+  }
+  
+  PHImageRequestOptionsDeliveryMode deliveryMode = PHImageRequestOptionsDeliveryModeOpportunistic;
+  if ([deliveryModeString isEqualToString:@"highQualityFormat"]) {
+    deliveryMode = PHImageRequestOptionsDeliveryModeHighQualityFormat;
+  } else if ([deliveryModeString isEqualToString:@"fastFormat"]) {
+    deliveryMode = PHImageRequestOptionsDeliveryModeFastFormat;
+  }
+  
+  PHImageRequestOptions *options = [[PHImageRequestOptions alloc] init];
+  options.deliveryMode = deliveryMode;
+
+  requestPhotoLibraryAccess(^(NSString *errorCode, NSString *errorMessage) {
+    callback(@[
+      @{
+        @"errorCode": errorCode,
+        @"message": errorMessage
+      },
+      [NSNull null]
+    ]);
+  }, ^{
+    PHFetchResult <PHAsset *> *const assetFetchResult = [PHAsset fetchAssetsWithLocalIdentifiers:@[localIdentifier] options:nil];
+    if (![assetFetchResult firstObject]) {
+      callback(@[
+        @{
+          @"errorCode": @"no_asset",
+          @"message": @"Asset not found"
+        },
+        [NSNull null]
+      ]);
+    }
+    
+    __block BOOL firstResponse = YES;
+    [[PHImageManager defaultManager] requestImageForAsset:[assetFetchResult firstObject] targetSize:CGSizeMake(targetWidth, targetHeight) contentMode:contentMode options:options resultHandler:^(UIImage * _Nullable result, NSDictionary * _Nullable info) {
+      NSData *data;
+      if ([format isEqualToString:@"png"]) {
+          RCTLogInfo(@"png");
+        data = UIImagePNGRepresentation(result);
+      } else {
+          RCTLogInfo(@"jpeg");
+        data = UIImageJPEGRepresentation(result, 1.0f);
+      }
+        if (firstResponse) {
+            firstResponse = NO;
+            callback(@[[NSNull null], [data base64EncodedStringWithOptions:NSDataBase64EncodingEndLineWithLineFeed]]);
+        }
+    }];
+  });
+}
+
+RCT_EXPORT_METHOD(getPhotoMetadata:(NSDictionary *)params
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+{
+  checkPhotoLibraryConfig();
+
+  NSString *const uri = [RCTConvert NSString:params[@"uri"]];
+
+  NSString *const localIdentifier = [uri stringByReplacingOccurrencesOfString:@"ph://" withString:@""];
+
+  requestPhotoLibraryAccessAndReject(reject, ^{
+    PHFetchResult <PHAsset *> *const assetFetchResult = [PHAsset fetchAssetsWithLocalIdentifiers:@[localIdentifier] options:nil];
+    PHAsset *asset = [assetFetchResult firstObject];
+    if (!asset) {
+      reject(@"no_asset", @"Asset not found", nil);
+      return;
+    }
+    
+    [asset requestMetadataWithCompletionBlock:^(NSDictionary *metadata) {
+      resolve(metadata);
+    }];
   });
 }
 

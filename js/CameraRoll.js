@@ -69,6 +69,27 @@ export type GetPhotosParams = {
   mimeTypes?: Array<string>,
 };
 
+/**
+ * Shape of the param arg for the `getPhotoFile` function.
+ */
+export type GetPhotoFileParams = {
+  uri: String,
+};
+
+/**
+ * Shape of the param arg for the `getPhotoData` function.
+ */
+export type GetPhotoDataParams = {
+  uri: String,
+  size: {
+    width: number,
+    height: number,
+  },
+  contentMode?: string,
+  deliveryMode?: string,
+  format?: string,
+};
+
 export type PhotoIdentifier = {
   node: {
     type: string,
@@ -104,6 +125,12 @@ export type SaveToCameraRollOptions = {
   type?: 'photo' | 'video' | 'auto',
   album?: string,
 };
+
+export type PhotoFileResponse = {
+  fileUri: string,
+  release: Function,
+};
+export type PhotoDataResponse = string;
 
 export type GetAlbumsParams = {
   assetType?: $Keys<typeof ASSET_TYPE_OPTIONS>,
@@ -204,6 +231,53 @@ class CameraRoll {
       RNCCameraRoll.getPhotos(params).then(successCallback, errorCallback);
     }
     return RNCCameraRoll.getPhotos(params);
+  }
+
+  /**
+   * Copies photo asset to temporary local file
+   *
+   * See https://facebook.github.io/react-native/docs/cameraroll.html#getphoto
+   */
+  static getPhotoFile(params: GetPhotoFileParams): Promise<PhotoFileResponse> {
+    return new Promise((resolve, reject) => {
+      return RNCCameraRoll.getPhotoFile(params, (error, fileUri) => {
+        if (error) {
+          return reject(error);
+        }
+        return resolve({
+          fileUri,
+          release: () => RNCCameraRoll.releasePhotoFile({ fileUri }),
+        });
+      });
+    });
+  }
+
+  /**
+   * Returns photo data
+   *
+   * See https://facebook.github.io/react-native/docs/cameraroll.html#getphoto
+   */
+  static getPhotoData(params: GetPhotoDataParams): Promise<PhotoDataResponse> {
+    const fnParams = {
+      contentMode: '',
+      deliveryMode: '',
+      format: '',
+      ...params,
+      targetWidth: params.size.width,
+      targetHeight: params.size.height,
+    };
+    return new Promise((resolve, reject) => {
+      return RNCCameraRoll.getPhotoData(fnParams, (error, data) => {
+        if (error) {
+          return reject(error);
+        }
+        return resolve(data);
+      });
+    });
+  }
+
+  static getPhotoMetadata(params: GetPhotoDataParams): Promise<PhotoDataResponse> {
+    return RNCCameraRoll.getPhotoMetadata(params);
   }
 }
 
